@@ -296,13 +296,39 @@ class PromptedLLM(Potential):
         """
         # This is ugly, but it's useful for all potentials to adhere to the convention
         # of keeping the EOS token at the end of the weights array.
+
+        # Cache eos_idxs_tensor and non_eos_indices on first use
+        if (
+            not hasattr(self, "_eos_idxs_tensor")
+            or not hasattr(self, "_non_eos_indices")
+            or self._eos_idxs_tensor.device != logw_next.device
+        ):
+            self._eos_idxs_tensor = torch.tensor(
+                self.token_maps.eos_idxs, device=logw_next.device
+            )
+            all_indices = torch.arange(
+                len(self.token_maps.decode), device=logw_next.device
+            )
+            self._non_eos_indices = all_indices[
+                ~torch.isin(all_indices, self._eos_idxs_tensor)
+            ]
+
         logw_next = logw_next[: len(self.token_maps.decode)]
         logw_next = logw_next.log_softmax(dim=0)
-        _logw_next = torch.full((len(self.vocab) + 1,), float('-inf'), dtype=logw_next.dtype, device=logw_next.device)
-        _logw_next[: len(self.vocab)] = logw_next[
-            ~torch.isin(torch.arange(len(logw_next)), torch.tensor(self.token_maps.eos_idxs))
-        ]
-        _logw_next[-1] = torch.logsumexp(logw_next[self.token_maps.eos_idxs], dim=0).item()
+        _logw_next = torch.full(
+            (len(self.vocab) + 1,),
+            float("-inf"),
+            dtype=logw_next.dtype,
+            device=logw_next.device,
+        )
+        _logw_next[: len(self.vocab)] = logw_next[self._non_eos_indices]
+
+        # Special case: if only one EOS idx, just assign directly (avoids cost of logsumexp)
+        if self._eos_idxs_tensor.numel() == 1:
+            _logw_next[-1] = logw_next[self._eos_idxs_tensor]
+        else:
+            _logw_next[-1] = torch.logsumexp(logw_next[self._eos_idxs_tensor], dim=0)
+
         return self.make_lazy_weights(_logw_next.float().cpu().numpy())
 
     async def logw_next(self, context):
@@ -335,10 +361,7 @@ class PromptedLLM(Potential):
                 [self.prompt_ids + self.encode_tokens(context) for context in contexts]
             )
         )
-        return [
-            self._process_logw_next(logw_next)
-            for logw_next in logw_nexts
-        ]
+        return [self._process_logw_next(logw_next) for logw_next in logw_nexts]
 
     def __repr__(self):
         return f"PromptedLLM(prompt={self.prompt!r})"
