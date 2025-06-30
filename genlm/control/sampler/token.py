@@ -1,7 +1,7 @@
 import numpy as np
 from arsenal import colors
 from llamppl import SubModel
-from arsenal.maths import log1mexp, logsumexp
+from arsenal.maths import logsumexp
 
 from genlm.control.util import fast_sample_lazyweights
 from genlm.control.sampler.set import SetSampler
@@ -264,7 +264,30 @@ class AWRS(TokenSampler):
         logps = logws.weights - logZ
         toks = logws.decode
 
-        tok, nrej, logp0 = None, 0, []
+        # Note that this is a different algorithm than the one described
+        # in the paper.
+        #
+        # Rather than use a RAVI-based estimator for the weight, we reduce
+        # the sampling without replacement process to a sampling with
+        # replacement process.
+        #
+        # This works by imagining that each token produced by the sampling
+        # without replacement is preceded by some number of tokens that have
+        # previously been seen. We don't need to know what those tokens are,
+        # only how many of them there are, which can be calculated by sampling
+        # from a geometric distribution with parameter equal to the total mass
+        # of tokens that have previously been removed from our distribution.
+        #
+        # This will have a significantly lower variance than the estimator
+        # from the paper. It might in fact be the Minimum Variance Unbiased
+        # Estimator (MVUE) for the weight, but we're not 100% sure of the
+        # details. Informal experiments suggest that it has about 2-5x lower
+        # variance than the paper's estimator.
+
+        replacement_probabilities = [0.0]
+
+        tok = None
+        nrej = 0
         for _ in range(2):
             keys = logps - np.log(-np.log(self.rng.random((self.V,))))
             order = np.argsort(-keys)
@@ -273,13 +296,15 @@ class AWRS(TokenSampler):
                 if keys[item] == -np.inf:
                     break
                 if await self._accept(context, toks[item], verbosity):
+                    replacement_probabilities.append(replacement_probabilities[-1])
                     if tok is None:
                         tok = toks[item]
                     break
                 else:
                     nrej += 1
-                    if tok is None:
-                        logp0.append(logps[item])
+                    replacement_probabilities.append(
+                        replacement_probabilities[-1] + np.exp(logps[item])
+                    )
                     logps[item] = -np.inf
 
             if not self.proper_weights:
@@ -290,9 +315,38 @@ class AWRS(TokenSampler):
         if tok is None:  # No token was accepted, return EOS and kill the particle.
             return self.target.eos, float("-inf"), np.nan
 
-        if not logp0:  # Success on first try.
-            logw = logZ - np.log(nrej + 1)
-        else:
-            logw = logZ + log1mexp(logsumexp(logp0)) - np.log(nrej + 1)
+        replacement_probabilities = np.array(replacement_probabilities[:-1])
+        novel_probabilities = (
+            1.0 - replacement_probabilities[replacement_probabilities > 0]
+        )
+
+        # How many tokens were implicitly discarded by the sampling without
+        # replacement process before we saw two accepted tokens.
+        #
+        # We simulate the sampling with replacement process multiple times,
+        # in order to take a monte carlo estimate of the expected value
+        # of the estimator for each sample. This works because of the law
+        # of conditional expectation, which allows us to use the conditional
+        # expectation of the estimator conditioned on the
+        # sample-without-replacement we took and use that as an estimator
+        # for the expected value of the without-replacement estimator.
+        hidden_token_counts = (
+            self.rng.geometric(
+                novel_probabilities, size=(100, len(novel_probabilities))
+            )
+            - 1
+        ).sum(axis=1)
+        assert len(hidden_token_counts) == 100
+
+        # Each sample is implicitly a sample from a NB(p, 2) distribution,
+        # with the number seen being the number of novel rejections, plus
+        # the number of hidden tokens. These are then the standard MVUE
+        # estimators for the parameters of the negative binomial distribution.
+        estimators = 1.0 / (hidden_token_counts + nrej + 1)
+
+        # The estimators give us an unbiased estimate for the probability
+        # of acceptance, which we then need to adjust for the fact that
+        # the token distribution may not be normalized.
+        logw = np.log(np.mean(estimators)) + logZ
 
         return tok, logw, np.nan

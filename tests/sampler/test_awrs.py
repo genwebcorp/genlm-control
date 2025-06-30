@@ -3,7 +3,7 @@ import asyncio
 import numpy as np
 from arsenal.maths import logsumexp
 from conftest import MockPotential
-from hypothesis import given, strategies as st, settings, reject
+from hypothesis import given, strategies as st, settings, reject, example
 
 from genlm.control.sampler.token import AWRS
 
@@ -111,9 +111,26 @@ def params(draw, min_p=1e-3):
 
 
 @pytest.mark.asyncio
+@example(([b"\x00"], [False, True], [0.5, 0.5]))
 @settings(deadline=None, max_examples=25)
 @given(params())
 async def test_awrs(params):
+    await assert_monte_carlo_close(
+        sampler_cls=AWRS,
+        params=params,
+        N=10000,
+        equality_opts={"rtol": 2e-2, "atol": 2e-2},
+    )
+
+
+@pytest.mark.asyncio
+@settings(deadline=None, max_examples=25)
+@given(params(), st.floats(min_value=0.01, max_value=2.0))
+async def test_awrs_unnormalized_weights(params, normalizing_constant):
+    vocab, b_weights, c_weights = params
+    c_weights = [w * normalizing_constant for w in c_weights]
+    params = (vocab, b_weights, c_weights)
+
     await assert_monte_carlo_close(
         sampler_cls=AWRS,
         params=params,
