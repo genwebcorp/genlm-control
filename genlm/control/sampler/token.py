@@ -349,33 +349,6 @@ class AWRS(TokenSampler):
         if n_rejects == 0:
             return tok, logZ, np.nan
 
-        # We want geometric samples for the monte carlo simulation, but
-        # annoyingly numpy's geometric distribution doesn't allow us to
-        # set p=1, so we create the initial samples as zeros, then
-        # concatenate them with the geometric samples to get the whole
-        # sample for the simulation.
-        novel_probabilities = 1 - np.array(replacement_probabilities[:-1])
-        for i, x in enumerate(novel_probabilities):
-            if x < 1:
-                novel_start = i
-                break
-        sub_one_probabilities = novel_probabilities[novel_start:]
-        initial_zeros = np.zeros(
-            (self.n_monte_carlo_samples, len(novel_probabilities[:novel_start]))
-        )
-        geometric_samples = (
-            self.rng.geometric(
-                sub_one_probabilities,
-                size=(self.n_monte_carlo_samples, len(sub_one_probabilities)),
-            )
-            - 1
-        )
-
-        estimators = []
-        samples = np.concatenate((initial_zeros, geometric_samples), axis=1)
-
-        assert samples.shape == (self.n_monte_carlo_samples, len(novel_probabilities))
-
         def calc_estimator(local_accepts, local_rejects):
             # This is an estimator for the probability of acceptance,
             # from a random variable that samples with replacement until
@@ -397,6 +370,13 @@ class AWRS(TokenSampler):
                 assert local_rejects == self.max_rejects
                 return local_accepts / denominator
 
+        novel_probabilities = 1 - np.array(replacement_probabilities[:-1])
+        for i, x in enumerate(novel_probabilities):
+            if x < 1:
+                novel_start = i
+                break
+        sub_one_probabilities = novel_probabilities[novel_start:]
+
         # If we have successfully found a token but are very close to
         # the maximum number of rejects, it's possible for the simulation
         # of the sampling with replacement to always exceed the maximum
@@ -412,39 +392,74 @@ class AWRS(TokenSampler):
         p_all_zero = np.exp(np.log(novel_probabilities).sum())
         base_estimator = calc_estimator(n_accepts, n_rejects)
 
-        for i in range(self.n_monte_carlo_samples):
-            # Simulate the sampling with replacement process, by modelling
-            # a number of discarded tokens that were previously seen,
-            # inserted before each novel token in the rejection sample.
+        def gen_monte_carlo_samples(n_samples):
+            # We want geometric samples for the monte carlo simulation, but
+            # annoyingly numpy's geometric distribution doesn't allow us to
+            # set p=1, so we create the initial samples as zeros, then
+            # concatenate them with the geometric samples to get the whole
+            # sample for the simulation.
+            initial_zeros = np.zeros(
+                (n_samples, len(novel_probabilities[:novel_start]))
+            )
+            geometric_samples = (
+                self.rng.geometric(
+                    sub_one_probabilities,
+                    size=(n_samples, len(sub_one_probabilities)),
+                )
+                - 1
+            )
 
-            sample = samples[i]
-            if not sample.any():
-                continue
+            samples = np.concatenate((initial_zeros, geometric_samples), axis=1)
 
-            if sample.sum() + n_rejects < self.max_rejects:
-                local_rejects = sample.sum() + n_rejects
-                local_accepts = self.max_accepts
-            else:
-                local_accepts = 0
-                local_rejects = 0
+            assert samples.shape == (
+                n_samples,
+                len(novel_probabilities),
+            )
+            return samples
 
-                for i in range(len(accepted)):
-                    if (
-                        local_accepts == self.max_accepts
-                        or local_rejects == self.max_rejects
-                    ):
-                        break
+        estimators = []
 
-                    local_rejects += sample[i]
-                    if local_rejects >= self.max_rejects:
-                        local_rejects = self.max_rejects
-                        break
+        # Because the monte carlo simulation is done conditionally on
+        # not all of the geometric samples rolling zero, we may need
+        # to run it a few times to get the number of samples we need.
+        n_monte_carlo_samples_done = 0
+        while n_monte_carlo_samples_done < self.n_monte_carlo_samples:
+            for sample in gen_monte_carlo_samples(
+                self.n_monte_carlo_samples - n_monte_carlo_samples_done
+            ):
+                # Simulate the sampling with replacement process, by modelling
+                # a number of discarded tokens that were previously seen,
+                # inserted before each novel token in the rejection sample.
 
-                    if accepted[i]:
-                        local_accepts += 1
-                    else:
-                        local_rejects += 1
-            estimators.append(calc_estimator(local_accepts, local_rejects))
+                if not sample.any():
+                    continue
+
+                n_monte_carlo_samples_done += 1
+
+                if sample.sum() + n_rejects < self.max_rejects:
+                    local_rejects = sample.sum() + n_rejects
+                    local_accepts = self.max_accepts
+                else:
+                    local_accepts = 0
+                    local_rejects = 0
+
+                    for i in range(len(accepted)):
+                        if (
+                            local_accepts == self.max_accepts
+                            or local_rejects == self.max_rejects
+                        ):
+                            break
+
+                        local_rejects += sample[i]
+                        if local_rejects >= self.max_rejects:
+                            local_rejects = self.max_rejects
+                            break
+
+                        if accepted[i]:
+                            local_accepts += 1
+                        else:
+                            local_rejects += 1
+                estimators.append(calc_estimator(local_accepts, local_rejects))
 
         # The estimators give us an unbiased estimate for the probability
         # of acceptance, which we then need to adjust for the fact that
