@@ -198,10 +198,21 @@ class AWRS(TokenSampler):
         prune_logws (bool): Whether to prune the logws to only include the tokens in the intersection of the potential and condition vocabularies
         proper_weights (bool): Whether to return properly weighted samples.
             If False, the sampler will only run one round of adaptive rejection sampling.
+        max_accepts (int): The maximum number of tokens to accept - higher values will decrease the variance of the weight estimate.
+        max_rejects (int or None): The maximum number of tokens to reject - lower values will run faster, but at the cost of returning a weight of zero for some samples where there are tokens that would be accepted if tested.
+        n_monte_carlo_samples (int): The number of Monte Carlo samples to use to estimate the weight. Higher values will decrease the variance of the weight estimate, but will run slower.
     """
 
     def __init__(
-        self, potential, condition, seed=42, prune_logws=True, proper_weights=True
+        self,
+        potential,
+        condition,
+        seed=42,
+        prune_logws=True,
+        proper_weights=True,
+        max_accepts=2,
+        max_rejects=None,
+        n_monte_carlo_samples=10,
     ):
         super().__init__(target=potential * condition)
         self.potential = potential
@@ -209,6 +220,12 @@ class AWRS(TokenSampler):
 
         self.prune_logws = prune_logws
         self.proper_weights = proper_weights
+
+        self.max_accepts = max_accepts
+        self.max_rejects = max_rejects or len(self.potential.vocab_eos)
+
+        self.n_monte_carlo_samples = n_monte_carlo_samples
+
         self.valid_idxs = np.array(
             [self.potential.lookup[t] for t in self.target.vocab_eos]
         )
@@ -285,27 +302,40 @@ class AWRS(TokenSampler):
         # variance than the paper's estimator.
 
         replacement_probabilities = [0.0]
+        accepted = []
+
+        n_accepts = 0
+        n_rejects = 0
 
         tok = None
-        nrej = 0
-        for _ in range(2):
+        progress = True
+
+        while (
+            n_accepts < self.max_accepts and n_rejects < self.max_rejects and progress
+        ):
+            progress = False
             keys = logps - np.log(-np.log(self.rng.random((self.V,))))
             order = np.argsort(-keys)
-            for rank in range(logps.size):
-                item = order[rank]
+            for item in order:
                 if keys[item] == -np.inf:
                     break
+                progress = True
                 if await self._accept(context, toks[item], verbosity):
+                    accepted.append(True)
                     replacement_probabilities.append(replacement_probabilities[-1])
                     if tok is None:
                         tok = toks[item]
+                    n_accepts += 1
                     break
                 else:
-                    nrej += 1
+                    accepted.append(False)
                     replacement_probabilities.append(
                         replacement_probabilities[-1] + np.exp(logps[item])
                     )
                     logps[item] = -np.inf
+                    n_rejects += 1
+                    if n_rejects == self.max_rejects:
+                        break
 
             if not self.proper_weights:
                 if tok is None:
@@ -315,34 +345,82 @@ class AWRS(TokenSampler):
         if tok is None:  # No token was accepted, return EOS and kill the particle.
             return self.target.eos, float("-inf"), np.nan
 
-        replacement_probabilities = np.array(replacement_probabilities[:-1])
-        novel_probabilities = (
-            1.0 - replacement_probabilities[replacement_probabilities > 0]
-        )
+        if n_rejects == 0:
+            return tok, logZ, np.nan
 
-        # How many tokens were implicitly discarded by the sampling without
-        # replacement process before we saw two accepted tokens.
-        #
-        # We simulate the sampling with replacement process multiple times,
-        # in order to take a monte carlo estimate of the expected value
-        # of the estimator for each sample. This works because of the law
-        # of conditional expectation, which allows us to use the conditional
-        # expectation of the estimator conditioned on the
-        # sample-without-replacement we took and use that as an estimator
-        # for the expected value of the without-replacement estimator.
-        hidden_token_counts = (
+        novel_probabilities = 1 - np.array(replacement_probabilities[:-1])
+
+        estimators = []
+
+        for i, x in enumerate(novel_probabilities):
+            if x < 1:
+                novel_start = i
+                break
+
+        sub_one_probabilities = novel_probabilities[novel_start:]
+        initial_zeros = np.zeros(
+            (self.n_monte_carlo_samples, len(novel_probabilities[:novel_start]))
+        )
+        geometric_samples = (
             self.rng.geometric(
-                novel_probabilities, size=(100, len(novel_probabilities))
+                sub_one_probabilities,
+                size=(self.n_monte_carlo_samples, len(sub_one_probabilities)),
             )
             - 1
-        ).sum(axis=1)
-        assert len(hidden_token_counts) == 100
+        )
+        samples = np.concatenate((initial_zeros, geometric_samples), axis=1)
 
-        # Each sample is implicitly a sample from a NB(p, 2) distribution,
-        # with the number seen being the number of novel rejections, plus
-        # the number of hidden tokens. These are then the standard MVUE
-        # estimators for the parameters of the negative binomial distribution.
-        estimators = 1.0 / (hidden_token_counts + nrej + 1)
+        assert samples.shape == (self.n_monte_carlo_samples, len(novel_probabilities))
+
+        for i in range(self.n_monte_carlo_samples):
+            # Simulate the sampling with replacement process, by modelling
+            # a number of discarded tokens that were previously seen,
+            # inserted before each novel token in the rejection sample.
+
+            sample = samples[i]
+            if sample.sum() + n_rejects < self.max_rejects:
+                local_rejects = sample.sum() + n_rejects
+                local_accepts = self.max_accepts
+            else:
+                local_accepts = 0
+                local_rejects = 0
+
+                for i in range(len(accepted)):
+                    if (
+                        local_accepts == self.max_accepts
+                        or local_rejects == self.max_rejects
+                    ):
+                        break
+
+                    local_rejects += sample[i]
+                    if local_rejects >= self.max_rejects:
+                        local_rejects = self.max_rejects
+                        break
+
+                    if accepted[i]:
+                        local_accepts += 1
+                    else:
+                        local_rejects += 1
+
+            # This is an estimator for the probability of acceptance,
+            # from a random variable that samples with replacement until
+            # it sees either a certain number of accepted tokens or a certain
+            # number of rejected tokens.
+            #
+            # You can work out this estimator by applying the Rao-Blackwell
+            # theorem, starting from the estimator that returns 1 if the first
+            # sample is accepted, and 0 otherwise, conditioned on the total number
+            # of accepted and rejected tokens seen. When you do this, it reduces
+            # to a sequence counting problem, by looking at the fraction of sequences
+            # that have those counts which start with 1.
+
+            denominator = local_rejects + local_accepts - 1
+
+            if local_accepts == self.max_accepts:
+                estimators.append((self.max_accepts - 1) / denominator)
+            else:
+                assert local_rejects == self.max_rejects
+                estimators.append(local_accepts / denominator)
 
         # The estimators give us an unbiased estimate for the probability
         # of acceptance, which we then need to adjust for the fact that
