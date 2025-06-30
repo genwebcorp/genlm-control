@@ -299,7 +299,8 @@ class AWRS(TokenSampler):
         # from the paper. It might in fact be the Minimum Variance Unbiased
         # Estimator (MVUE) for the weight, but we're not 100% sure of the
         # details. Informal experiments suggest that it has about 2-5x lower
-        # variance than the paper's estimator.
+        # variance than the paper's estimator. It also allows a clean
+        # implementation of the max_rejects parameter.
 
         replacement_probabilities = [0.0]
         accepted = []
@@ -348,15 +349,16 @@ class AWRS(TokenSampler):
         if n_rejects == 0:
             return tok, logZ, np.nan
 
+        # We want geometric samples for the monte carlo simulation, but
+        # annoyingly numpy's geometric distribution doesn't allow us to
+        # set p=1, so we create the initial samples as zeros, then
+        # concatenate them with the geometric samples to get the whole
+        # sample for the simulation.
         novel_probabilities = 1 - np.array(replacement_probabilities[:-1])
-
-        estimators = []
-
         for i, x in enumerate(novel_probabilities):
             if x < 1:
                 novel_start = i
                 break
-
         sub_one_probabilities = novel_probabilities[novel_start:]
         initial_zeros = np.zeros(
             (self.n_monte_carlo_samples, len(novel_probabilities[:novel_start]))
@@ -368,9 +370,47 @@ class AWRS(TokenSampler):
             )
             - 1
         )
+
+        estimators = []
         samples = np.concatenate((initial_zeros, geometric_samples), axis=1)
 
         assert samples.shape == (self.n_monte_carlo_samples, len(novel_probabilities))
+
+        def calc_estimator(local_accepts, local_rejects):
+            # This is an estimator for the probability of acceptance,
+            # from a random variable that samples with replacement until
+            # it sees either a certain number of accepted tokens or a certain
+            # number of rejected tokens.
+            #
+            # You can work out this estimator by applying the Rao-Blackwell
+            # theorem, starting from the estimator that returns 1 if the first
+            # sample is accepted, and 0 otherwise, conditioned on the total number
+            # of accepted and rejected tokens seen. When you do this, it reduces
+            # to a sequence counting problem, by looking at the fraction of sequences
+            # that have those counts which start with 1.
+
+            denominator = local_rejects + local_accepts - 1
+
+            if local_accepts == self.max_accepts:
+                return (self.max_accepts - 1) / denominator
+            else:
+                assert local_rejects == self.max_rejects
+                return local_accepts / denominator
+
+        # If we have successfully found a token but are very close to
+        # the maximum number of rejects, it's possible for the simulation
+        # of the sampling with replacement to always exceed the maximum
+        # number of rejections, which gives us a weight of zero despite
+        # having successfully found a token. We don't want to do that.
+        #
+        # So we split the estimator up into two parts: One where all
+        # of the geometric distributions rolled zero, which we can calculate
+        # the probability of exactly and can estimate in that case, and do
+        # the monte-carlo simulation conditional on at least one of the
+        # geometric samples rolling non-zero. We then combine the two
+        # estimators at the end.
+        p_all_zero = np.exp(np.log(novel_probabilities).sum())
+        base_estimator = calc_estimator(n_accepts, n_rejects)
 
         for i in range(self.n_monte_carlo_samples):
             # Simulate the sampling with replacement process, by modelling
@@ -378,6 +418,9 @@ class AWRS(TokenSampler):
             # inserted before each novel token in the rejection sample.
 
             sample = samples[i]
+            if not sample.any():
+                continue
+
             if sample.sum() + n_rejects < self.max_rejects:
                 local_rejects = sample.sum() + n_rejects
                 local_accepts = self.max_accepts
@@ -401,30 +444,18 @@ class AWRS(TokenSampler):
                         local_accepts += 1
                     else:
                         local_rejects += 1
-
-            # This is an estimator for the probability of acceptance,
-            # from a random variable that samples with replacement until
-            # it sees either a certain number of accepted tokens or a certain
-            # number of rejected tokens.
-            #
-            # You can work out this estimator by applying the Rao-Blackwell
-            # theorem, starting from the estimator that returns 1 if the first
-            # sample is accepted, and 0 otherwise, conditioned on the total number
-            # of accepted and rejected tokens seen. When you do this, it reduces
-            # to a sequence counting problem, by looking at the fraction of sequences
-            # that have those counts which start with 1.
-
-            denominator = local_rejects + local_accepts - 1
-
-            if local_accepts == self.max_accepts:
-                estimators.append((self.max_accepts - 1) / denominator)
-            else:
-                assert local_rejects == self.max_rejects
-                estimators.append(local_accepts / denominator)
+            estimators.append(calc_estimator(local_accepts, local_rejects))
 
         # The estimators give us an unbiased estimate for the probability
         # of acceptance, which we then need to adjust for the fact that
         # the token distribution may not be normalized.
-        logw = np.log(np.mean(estimators)) + logZ
+        if estimators:
+            logp = np.log(
+                p_all_zero * base_estimator + (1 - p_all_zero) * np.mean(estimators)
+            )
+        else:
+            logp = np.log(p_all_zero) + np.log(base_estimator)
+
+        logw = logp + logZ
 
         return tok, logw, np.nan
