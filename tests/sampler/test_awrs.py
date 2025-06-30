@@ -267,3 +267,33 @@ async def test_does_not_returns_zero_weight_if_could_find_valid_token():
         tok, logw, _ = await sampler.sample([])
         assert logw != float("-inf")
         assert tok == vocab[0]
+
+
+@pytest.mark.asyncio
+@example(
+    params=([b"\x00"], [False, True], [0.5, 0.5]),
+    max_accepts=2,
+    max_rejects=2,
+    n_monte_carlo_samples=1,
+)
+@settings(deadline=None, max_examples=25)
+@given(
+    params=params(),
+    max_accepts=st.integers(min_value=2, max_value=5),
+    max_rejects=st.integers(min_value=2, max_value=5),
+    n_monte_carlo_samples=st.integers(min_value=1, max_value=5),
+)
+async def test_awrs_with_different_limits(
+    params, max_accepts, max_rejects, n_monte_carlo_samples
+):
+    await assert_monte_carlo_close(
+        sampler_cls=AWRS,
+        params=params,
+        N=10000,
+        equality_opts={"rtol": 2e-2, "atol": 2e-2},
+        sampler_opts={
+            "max_accepts": max_accepts,
+            "max_rejects": max_rejects,
+            "n_monte_carlo_samples": n_monte_carlo_samples,
+        },
+    )
