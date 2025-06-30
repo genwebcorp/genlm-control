@@ -249,3 +249,21 @@ async def test_awrs_with_no_pruning_and_different_vocabs():
     have = await monte_carlo(sampler, [], 10000)
 
     assert np.isclose(np.exp(want.sum()), np.exp(have.sum()), rtol=5e-3, atol=5e-3)
+
+
+@pytest.mark.asyncio
+async def test_does_not_returns_zero_weight_if_could_find_valid_token():
+    vocab = [bytes([i]) for i in range(4)]
+    c_weights = [0.01, 0.29, 0.2, 0.1, 0.4]
+
+    potential = MockPotential(vocab, np.log(c_weights))
+    condition = MockPotential(
+        vocab, [0, -float("inf"), -float("inf"), -float("inf"), -float("inf")]
+    )
+
+    sampler = AWRS(potential, condition, max_rejects=5)
+
+    for i in range(100):
+        tok, logw, _ = await sampler.sample([])
+        assert logw != float("-inf")
+        assert tok == vocab[0]
