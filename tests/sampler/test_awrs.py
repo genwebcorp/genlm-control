@@ -297,3 +297,24 @@ async def test_awrs_with_different_limits(
             "n_monte_carlo_samples": n_monte_carlo_samples,
         },
     )
+
+
+@pytest.mark.parametrize(
+    "params",
+    [
+        {"max_accepts": 1},
+        {"max_rejects": 1},
+        {"n_monte_carlo_samples": 0},
+    ],
+)
+def test_invalid_arguments(params):
+    potential = MockPotential(
+        [bytes([i]) for i in range(4)],
+        np.log([0.4, 0.3, 0.1, 0.1, 0.1]),
+    )
+    condition = MockPotential(
+        [bytes([i]) for i in range(4)],
+        [0, 0, float("-inf"), float("-inf"), 0],
+    )
+    with pytest.raises(ValueError):
+        AWRS(potential, condition, **params)

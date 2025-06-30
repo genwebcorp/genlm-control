@@ -221,9 +221,17 @@ class AWRS(TokenSampler):
         self.prune_logws = prune_logws
         self.proper_weights = proper_weights
 
+        if max_accepts < 2:
+            raise ValueError("`max_accepts` must be at least 2")
+
+        if max_rejects is not None and max_rejects < 2:
+            raise ValueError("`max_rejects` must be at least 2")
+
+        if n_monte_carlo_samples < 1:
+            raise ValueError("`n_monte_carlo_samples` must be at least 1")
+
         self.max_accepts = max_accepts
         self.max_rejects = max_rejects or len(self.potential.vocab_eos)
-
         self.n_monte_carlo_samples = n_monte_carlo_samples
 
         self.valid_idxs = np.array(
@@ -461,15 +469,9 @@ class AWRS(TokenSampler):
                             local_rejects += 1
                 estimators.append(calc_estimator(local_accepts, local_rejects))
 
-        # The estimators give us an unbiased estimate for the probability
-        # of acceptance, which we then need to adjust for the fact that
-        # the token distribution may not be normalized.
-        if estimators:
-            logp = np.log(
-                p_all_zero * base_estimator + (1 - p_all_zero) * np.mean(estimators)
-            )
-        else:
-            logp = np.log(p_all_zero) + np.log(base_estimator)
+        logp = np.log(
+            p_all_zero * base_estimator + (1 - p_all_zero) * np.mean(estimators)
+        )
 
         logw = logp + logZ
 
