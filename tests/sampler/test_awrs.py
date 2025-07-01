@@ -3,7 +3,7 @@ import asyncio
 import numpy as np
 from arsenal.maths import logsumexp
 from conftest import MockPotential
-from hypothesis import given, strategies as st, settings, reject
+from hypothesis import given, strategies as st, settings, reject, example
 
 from genlm.control.sampler.token import AWRS
 
@@ -111,9 +111,26 @@ def params(draw, min_p=1e-3):
 
 
 @pytest.mark.asyncio
+@example(([b"\x00"], [False, True], [0.5, 0.5]))
 @settings(deadline=None, max_examples=25)
 @given(params())
 async def test_awrs(params):
+    await assert_monte_carlo_close(
+        sampler_cls=AWRS,
+        params=params,
+        N=10000,
+        equality_opts={"rtol": 2e-2, "atol": 2e-2},
+    )
+
+
+@pytest.mark.asyncio
+@settings(deadline=None, max_examples=25)
+@given(params(), st.floats(min_value=0.01, max_value=2.0))
+async def test_awrs_unnormalized_weights(params, normalizing_constant):
+    vocab, b_weights, c_weights = params
+    c_weights = [w * normalizing_constant for w in c_weights]
+    params = (vocab, b_weights, c_weights)
+
     await assert_monte_carlo_close(
         sampler_cls=AWRS,
         params=params,
@@ -232,3 +249,72 @@ async def test_awrs_with_no_pruning_and_different_vocabs():
     have = await monte_carlo(sampler, [], 10000)
 
     assert np.isclose(np.exp(want.sum()), np.exp(have.sum()), rtol=5e-3, atol=5e-3)
+
+
+@pytest.mark.asyncio
+async def test_does_not_returns_zero_weight_if_could_find_valid_token():
+    vocab = [bytes([i]) for i in range(4)]
+    c_weights = [0.01, 0.29, 0.2, 0.1, 0.4]
+
+    potential = MockPotential(vocab, np.log(c_weights))
+    condition = MockPotential(
+        vocab, [0, -float("inf"), -float("inf"), -float("inf"), -float("inf")]
+    )
+
+    sampler = AWRS(potential, condition, max_rejects=5)
+
+    for i in range(100):
+        tok, logw, _ = await sampler.sample([])
+        assert logw != float("-inf")
+        assert tok == vocab[0]
+
+
+@pytest.mark.asyncio
+@example(
+    params=([b"\x00"], [False, True], [0.5, 0.5]),
+    max_accepts=2,
+    max_rejects=2,
+    n_monte_carlo_samples=1,
+)
+@settings(deadline=None, max_examples=25)
+@given(
+    params=params(),
+    max_accepts=st.integers(min_value=2, max_value=5),
+    max_rejects=st.integers(min_value=2, max_value=5),
+    n_monte_carlo_samples=st.integers(min_value=1, max_value=5),
+)
+async def test_awrs_with_different_limits(
+    params, max_accepts, max_rejects, n_monte_carlo_samples
+):
+    await assert_monte_carlo_close(
+        sampler_cls=AWRS,
+        params=params,
+        N=10000,
+        equality_opts={"rtol": 2e-2, "atol": 2e-2},
+        sampler_opts={
+            "max_accepts": max_accepts,
+            "max_rejects": max_rejects,
+            "n_monte_carlo_samples": n_monte_carlo_samples,
+        },
+    )
+
+
+@pytest.mark.parametrize(
+    "params",
+    [
+        {"max_accepts": 1},
+        {"max_rejects": 1},
+        {"n_monte_carlo_samples": 0},
+    ],
+)
+def test_invalid_arguments(params):
+    potential = MockPotential(
+        [bytes([i]) for i in range(4)],
+        np.log([0.4, 0.3, 0.1, 0.1, 0.1]),
+    )
+    condition = MockPotential(
+        [bytes([i]) for i in range(4)],
+        [0, 0, float("-inf"), float("-inf"), 0],
+    )
+    with pytest.raises(ValueError):
+        AWRS(potential, condition, **params)
