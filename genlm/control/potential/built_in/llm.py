@@ -55,7 +55,13 @@ class PromptedLLM(Potential):
     This class wraps an `AsyncLM` instance.
     """
 
-    def __init__(self, llm, prompt_ids=None, eos_tokens=None, temperature=1):
+    def __init__(
+        self,
+        llm,
+        prompt_ids=None,
+        eos_tokens=None,
+        temperature=1,
+    ):
         """`
         Initializes the PromptedLLM potential.
 
@@ -366,7 +372,7 @@ class PromptedLLM(Potential):
     def __repr__(self):
         return f"PromptedLLM(prompt={self.prompt!r})"
 
-    def spawn(self):
+    def spawn(self, prompt_ids=None, eos_tokens=None, temperature=None, **kwargs):
         """
         Spawn a new PromptedLLM with the same prompt and eos tokens.
 
@@ -378,9 +384,10 @@ class PromptedLLM(Potential):
         """
         return PromptedLLM(
             self.model,
-            prompt_ids=self.prompt_ids.copy(),
-            eos_tokens=self._eos_tokens.copy(),
-            temperature=self.temperature,
+            prompt_ids=prompt_ids or self.prompt_ids.copy(),
+            eos_tokens=eos_tokens or self._eos_tokens.copy(),
+            temperature=temperature or self.temperature,
+            **kwargs,
         )
 
     def spawn_new_eos(self, eos_tokens):
@@ -394,12 +401,7 @@ class PromptedLLM(Potential):
             (PromptedLLM): A new PromptedLLM with the specified end-of-sequence tokens.
                 The new model will have the same prompt_ids as `self`.
         """
-        return PromptedLLM(
-            self.model,
-            prompt_ids=self.prompt_ids.copy(),
-            eos_tokens=eos_tokens.copy(),
-            temperature=self.temperature,
-        )
+        return self.spawn(eos_tokens=eos_tokens)
 
     def to_autobatched(self):
         raise ValueError("PromptedLLMs are autobatched by default.")

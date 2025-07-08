@@ -201,6 +201,22 @@ def test_spawn(llm):
     assert new_llm.token_maps.eos_idxs == llm.token_maps.eos_idxs
     assert new_llm.vocab == llm.vocab
 
+    new_llm = llm.spawn(temperature=1.0)
+    assert new_llm.temperature == 1.0
+    assert new_llm.prompt_ids == llm.prompt_ids
+    assert new_llm.token_maps.decode == llm.token_maps.decode
+    assert new_llm.token_maps.eos_idxs == llm.token_maps.eos_idxs
+    assert new_llm.vocab == llm.vocab
+
+    new_llm = llm.spawn(prompt_ids=[0])
+    assert new_llm.temperature == llm.temperature
+    assert new_llm.prompt_ids == [0]
+
+    new_llm = llm.spawn(eos_tokens=[b"!"], temperature=1.0)
+    assert new_llm.token_maps.eos_idxs == [0]
+    assert new_llm.temperature == 1.0
+    assert new_llm.prompt_ids == llm.prompt_ids
+
 
 def test_to_autobatched(llm):
     with pytest.raises(ValueError, match="PromptedLLMs are autobatched by default"):
