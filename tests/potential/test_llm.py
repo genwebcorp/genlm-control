@@ -2,7 +2,7 @@ import pytest
 import torch
 import numpy as np
 from arsenal.maths import logsumexp
-from hypothesis import given, strategies as st, settings
+from hypothesis import given, strategies as st, settings, reject
 
 from genlm.control.potential.built_in import PromptedLLM
 
@@ -92,13 +92,15 @@ async def test_scoring(llm, pre_prompt, context_str, temp):
 @pytest.mark.asyncio
 @settings(deadline=None, max_examples=50)
 @given(
-    st.text(min_size=1),
+    st.text(min_size=1, max_size=10),
     st.text(min_size=1, max_size=10),
     st.floats(
         min_value=0.75, max_value=3
     ),  # TODO: scrutinize precision with low temperature
 )
 async def test_properties(llm, pre_prompt, context, temp):
+    if "!" in context or "?" in context:
+        reject()  # We are using these as eos tokens, so we skip this example.
     pre_prompt_ids = llm.model.tokenizer.encode(pre_prompt)
     llm.prompt_ids = pre_prompt_ids
     context = llm.tokenize(context)
@@ -106,6 +108,10 @@ async def test_properties(llm, pre_prompt, context, temp):
 
     await llm.assert_logw_next_consistency(context, top=10, rtol=0.01, atol=1e-3)
     await llm.assert_autoreg_fact(context, rtol=0.01, atol=1e-3)
+
+    new_llm = llm.spawn_new_eos(eos_tokens=[b"!", b"?"])
+    await new_llm.assert_logw_next_consistency(context, top=10, rtol=0.01, atol=1e-3)
+    await new_llm.assert_autoreg_fact(context, rtol=0.01, atol=1e-3)
 
 
 @pytest.mark.asyncio
