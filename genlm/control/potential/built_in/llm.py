@@ -374,7 +374,16 @@ class PromptedLLM(Potential):
 
     def spawn(self, prompt_ids=None, eos_tokens=None, temperature=None, **kwargs):
         """
-        Spawn a new PromptedLLM with the same prompt and eos tokens.
+        Spawn a new PromptedLLM.
+
+        Args:
+            prompt_ids (optional, list[int]): The prompt to use as a prompt prefix for all input contexts.
+                Defaults to the same prompt_ids as `self`.
+            eos_tokens (optional, list[bytes]): A list of tokens to treat as end-of-sequence tokens. 
+                Defaults to the same eos_tokens as `self`.
+            temperature (optional, float): The temperature with which to rescale logprobs. 
+                Defaults tot he same temperature as `self`.
+            kwargs (optional, dict): Additional options to pass to `PromptedLLM` at initialization.
 
         Returns:
             (PromptedLLM): A new PromptedLLM with the same prompt and eos tokens.
