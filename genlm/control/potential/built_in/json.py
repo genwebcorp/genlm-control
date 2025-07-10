@@ -434,7 +434,19 @@ class ObjectSchemaParser(Parser[Any]):
 
         properties = self.schema.get("properties", {})
         self.child_parsers = {k: json_schema_parser(v) for k, v in properties.items()}
-        if schema.get("additionalProperties", False):
+
+        # JSON schemas accept additional properties by default, but when
+        # generating that's almost always not what we want. The approach
+        # we take is to default to false, except in the case where no properties
+        # are specified, which we take to mean that an arbitrary object is expected
+        # here, so we default it to false. Where it is specified we always use
+        # the explicit value.
+        if "additionalProperties" in schema:
+            allow_additional_properties = schema["additionalProperties"]
+        else:
+            allow_additional_properties = "properties" not in schema
+
+        if allow_additional_properties:
             self.key_parser = STRING_LITERAL_PARSER
         else:
             # TODO: Something is going wrong here with regex escape codes
@@ -544,7 +556,7 @@ def json_schema_parser(schema):
         return BOOL_PARSER
     elif schema["type"] == "string":
         return STRING_LITERAL_PARSER
-    elif schema["type"] == "object" and schema.get("properties"):
+    elif schema["type"] == "object":
         return ObjectSchemaParser(schema)
     elif schema["type"] == "array":
         return ArraySchemaParser(schema)
