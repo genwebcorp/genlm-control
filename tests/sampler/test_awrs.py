@@ -114,7 +114,7 @@ def params(draw, min_p=1e-3):
 @example(([b"\x00"], [False, True], [0.5, 0.5]))
 @settings(deadline=None, max_examples=25)
 @given(params())
-async def test_awrs(params):
+async def test_awrs_is_unbiased(params):
     await assert_monte_carlo_close(
         sampler_cls=AWRS,
         params=params,
@@ -297,6 +297,81 @@ async def test_awrs_with_different_limits(
             "n_monte_carlo_samples": n_monte_carlo_samples,
         },
     )
+
+
+@pytest.mark.asyncio
+@settings(deadline=None, max_examples=100000)
+@example(
+    params=([b"\x00"], [True, False], [0.5, 0.5]),
+    max_accepts=2,
+    max_rejects=2,
+    n_monte_carlo_samples=1,
+    seed=0,
+)
+@example(
+    params=(
+        [b"\x00", b"\x01", b"\x02"],
+        [False, False, False, True],
+        [0.25, 0.25, 0.25, 0.25],
+    ),
+    max_accepts=2,
+    max_rejects=2,
+    n_monte_carlo_samples=1,
+    seed=0,
+)
+@example(
+    params=(
+        [b"\x00", b"\x01"],
+        [False, True, False],
+        [0.3333333333333333, 0.3333333333333333, 0.3333333333333333],
+    ),
+    max_accepts=2,
+    max_rejects=2,
+    n_monte_carlo_samples=1,
+    seed=0,
+)
+@given(
+    params=params(),
+    max_accepts=st.integers(min_value=2, max_value=5),
+    max_rejects=st.integers(min_value=2, max_value=5),
+    n_monte_carlo_samples=st.integers(min_value=1, max_value=5),
+    seed=st.integers(min_value=0, max_value=100),
+)
+async def test_awrs_does_not_return_zero_weight_token_is_valid(
+    params, max_accepts, max_rejects, n_monte_carlo_samples, seed
+):
+    vocab, b_weights, c_weights = params
+    potential = MockPotential(
+        vocab,
+        np.array([np.log(w) if w > 0 else float("-inf") for w in c_weights]),
+    )
+    condition = MockPotential(
+        vocab,
+        np.array([np.log(w) if w > 0 else float("-inf") for w in b_weights]),
+    )
+
+    sampler = AWRS(
+        max_accepts=max_accepts,
+        max_rejects=max_rejects,
+        n_monte_carlo_samples=n_monte_carlo_samples,
+        seed=seed,
+        potential=potential,
+        condition=condition,
+    )
+
+    tok, logp, _ = await sampler.sample([])
+
+    if tok == potential.eos:
+        weight = b_weights[-1]
+    else:
+        assert isinstance(tok, bytes)
+        assert len(tok) == 1
+        weight = b_weights[tok[0]]
+
+    if weight > 0:
+        assert logp > float("-inf")
+    else:
+        assert logp == float("-inf")
 
 
 @pytest.mark.parametrize(

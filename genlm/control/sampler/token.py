@@ -317,6 +317,7 @@ class AWRS(TokenSampler):
         n_rejects = 0
 
         tok = None
+        rejected_tok = None
         progress = True
 
         while (
@@ -337,6 +338,7 @@ class AWRS(TokenSampler):
                     n_accepts += 1
                     break
                 else:
+                    rejected_tok = toks[item]
                     accepted.append(False)
                     replacement_probabilities.append(
                         replacement_probabilities[-1] + np.exp(logps[item])
@@ -351,8 +353,9 @@ class AWRS(TokenSampler):
                     return self.target.eos, float("-inf"), np.nan
                 return tok, 0, np.nan
 
-        if tok is None:  # No token was accepted, return EOS and kill the particle.
-            return self.target.eos, float("-inf"), np.nan
+        # No token was accepted, return a rejected tokenand kill the particle.
+        if tok is None:
+            return rejected_tok, float("-inf"), np.nan
 
         if n_rejects == 0:
             return tok, logZ, np.nan
