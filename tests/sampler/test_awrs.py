@@ -3,7 +3,7 @@ import asyncio
 import numpy as np
 from arsenal.maths import logsumexp
 from conftest import MockPotential
-from hypothesis import given, strategies as st, settings, reject, example
+from hypothesis import given, strategies as st, settings, example
 
 from genlm.control.sampler.token import AWRS
 
@@ -79,14 +79,27 @@ async def assert_monte_carlo_close(
 
 @st.composite
 def V_size(draw):
-    # Generate a vocabulary of size <=4.
-    return draw(st.integers(min_value=1, max_value=4))
+    return draw(st.integers(min_value=1, max_value=256))
 
 
 @st.composite
 def cont_weights(draw, V_size, min_p=1e-3):
-    # Generate a list of floats for each token in the vocabulary (and EOS).
-    ws = draw(st.lists(st.floats(min_p, 1), min_size=V_size + 1, max_size=V_size + 1))
+    ws = [draw(st.floats(min_p, 1))] * (V_size + 1)
+
+    for ixs, f in draw(
+        st.lists(
+            st.tuples(st.sets(st.integers(0, V_size)), st.floats(min_p, 1)),
+        )
+    ):
+        for i in ixs:
+            ws[i] = f
+
+    # Maybe boost some weights in order to create more peaked distributions.
+    boost = draw(st.floats(min_value=1, max_value=1000))
+    to_boost = draw(st.sets(st.integers(min_value=0, max_value=V_size - 1)))
+    for i in to_boost:
+        ws[i] *= boost
+
     Z = sum(ws)
     ps = [w / Z for w in ws]
     return ps
@@ -95,11 +108,10 @@ def cont_weights(draw, V_size, min_p=1e-3):
 @st.composite
 def bool_weights(draw, V_size):
     # Generate a list of booleans for each token in the vocabulary (and EOS).
-    bws = draw(st.lists(st.booleans(), min_size=V_size + 1, max_size=V_size + 1))
-    if not any(bws):
-        # Need at least one valid token.
-        reject()
-    return bws
+    weights = [False] * (V_size + 1)
+    for i in draw(st.sets(st.integers(min_value=0, max_value=V_size))):
+        weights[i] = True
+    return weights
 
 
 @st.composite
@@ -300,47 +312,19 @@ async def test_awrs_with_different_limits(
 
 
 @pytest.mark.asyncio
-@settings(deadline=None, max_examples=100000)
-@example(
-    params=([b"\x00"], [True, False], [0.5, 0.5]),
-    max_accepts=2,
-    max_rejects=2,
-    n_monte_carlo_samples=1,
-    seed=0,
-)
-@example(
-    params=(
-        [b"\x00", b"\x01", b"\x02"],
-        [False, False, False, True],
-        [0.25, 0.25, 0.25, 0.25],
-    ),
-    max_accepts=2,
-    max_rejects=2,
-    n_monte_carlo_samples=1,
-    seed=0,
-)
-@example(
-    params=(
-        [b"\x00", b"\x01"],
-        [False, True, False],
-        [0.3333333333333333, 0.3333333333333333, 0.3333333333333333],
-    ),
-    max_accepts=2,
-    max_rejects=2,
-    n_monte_carlo_samples=1,
-    seed=0,
-)
+@settings(deadline=None, max_examples=100)
 @given(
-    params=params(),
-    max_accepts=st.integers(min_value=2, max_value=5),
-    max_rejects=st.integers(min_value=2, max_value=5),
+    max_accepts=st.integers(min_value=2, max_value=2),
+    max_rejects=st.integers(min_value=2, max_value=500),
     n_monte_carlo_samples=st.integers(min_value=1, max_value=5),
     seed=st.integers(min_value=0, max_value=100),
+    params=params(),
 )
 async def test_awrs_does_not_return_zero_weight_token_is_valid(
     params, max_accepts, max_rejects, n_monte_carlo_samples, seed
 ):
     vocab, b_weights, c_weights = params
+
     potential = MockPotential(
         vocab,
         np.array([np.log(w) if w > 0 else float("-inf") for w in c_weights]),
@@ -393,3 +377,35 @@ def test_invalid_arguments(params):
     )
     with pytest.raises(ValueError):
         AWRS(potential, condition, **params)
+
+
+@pytest.mark.asyncio
+async def test_awrs_example_with_underflow_error():
+    vocab = [bytes([i]) for i in range(182)]
+    b_weights = [False] * 56 + [True] + [False] * 126
+    c_weights = [0.23929169657812532] * 4 + [0.00023929169657812532] * 179
+
+    potential = MockPotential(
+        vocab,
+        np.log(c_weights),
+    )
+    condition = MockPotential(
+        vocab,
+        np.log(b_weights),
+    )
+
+    sampler = AWRS(
+        max_accepts=2,
+        max_rejects=183,
+        n_monte_carlo_samples=1,
+        seed=17,
+        potential=potential,
+        condition=condition,
+    )
+
+    for _ in range(1000):
+        tok, logp, _ = await sampler.sample([])
+        if tok == bytes([56]):
+            assert logp > float("-inf")
+        else:
+            assert logp == float("-inf")
