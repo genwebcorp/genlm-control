@@ -199,7 +199,7 @@ class AWRS(TokenSampler):
         proper_weights (bool): Whether to return properly weighted samples.
             If False, the sampler will only run one round of adaptive rejection sampling.
         max_accepts (int): The maximum number of tokens to accept - higher values will decrease the variance of the weight estimate.
-        max_rejects (int or None): The maximum number of tokens to reject - lower values will run faster, but at the cost of returning a weight of zero for some samples where there are tokens that would be accepted if tested.
+        max_rejects (int or float('inf')): The maximum number of tokens to reject - lower values will run faster, but at the cost of returning a weight of zero for some samples where there are tokens that would be accepted if tested.
         n_monte_carlo_samples (int): The number of Monte Carlo samples to use to estimate the weight. Higher values will decrease the variance of the weight estimate, but will run slower.
     """
 
@@ -211,7 +211,7 @@ class AWRS(TokenSampler):
         prune_logws=True,
         proper_weights=True,
         max_accepts=2,
-        max_rejects=None,
+        max_rejects=float("inf"),
         n_monte_carlo_samples=10,
     ):
         super().__init__(target=potential * condition)
@@ -224,7 +224,7 @@ class AWRS(TokenSampler):
         if max_accepts < 2:
             raise ValueError("`max_accepts` must be at least 2")
 
-        if max_rejects is not None and max_rejects < 2:
+        if max_rejects < 2:
             raise ValueError("`max_rejects` must be at least 2")
 
         if n_monte_carlo_samples < 1:
@@ -317,6 +317,7 @@ class AWRS(TokenSampler):
         n_rejects = 0
 
         tok = None
+        rejected_tok = None
         progress = True
 
         while (
@@ -337,6 +338,7 @@ class AWRS(TokenSampler):
                     n_accepts += 1
                     break
                 else:
+                    rejected_tok = toks[item]
                     accepted.append(False)
                     replacement_probabilities.append(
                         replacement_probabilities[-1] + np.exp(logps[item])
@@ -351,8 +353,9 @@ class AWRS(TokenSampler):
                     return self.target.eos, float("-inf"), np.nan
                 return tok, 0, np.nan
 
-        if tok is None:  # No token was accepted, return EOS and kill the particle.
-            return self.target.eos, float("-inf"), np.nan
+        # No token was accepted, return a rejected tokenand kill the particle.
+        if tok is None:
+            return rejected_tok, float("-inf"), np.nan
 
         if n_rejects == 0:
             return tok, logZ, np.nan
@@ -397,7 +400,16 @@ class AWRS(TokenSampler):
         # the monte-carlo simulation conditional on at least one of the
         # geometric samples rolling non-zero. We then combine the two
         # estimators at the end.
-        p_all_zero = np.exp(np.log(novel_probabilities).sum())
+        logp_all_zero = np.log(novel_probabilities).sum()
+
+        # Note: In many cases this rounds to zero, but that's actually fine.
+        # The difference between 1 and 1 - epsilon is negligible for these
+        # calculations.
+        logp_non_zero = np.log1p(-np.exp(logp_all_zero))
+
+        # This is the estimator we get when every geometric distribution
+        # rolled zero. It is guaranteed to be > 0 because we've seeen
+        # at least one accepted token.
         base_estimator = calc_estimator(n_accepts, n_rejects)
 
         def gen_monte_carlo_samples(n_samples):
@@ -469,9 +481,24 @@ class AWRS(TokenSampler):
                             local_rejects += 1
                 estimators.append(calc_estimator(local_accepts, local_rejects))
 
-        logp = np.log(
-            p_all_zero * base_estimator + (1 - p_all_zero) * np.mean(estimators)
-        )
+        estimators_prediction = np.mean(estimators)
+
+        # p = p_all_zero * base_estimator + p_non_zero * estimators_prediction
+        # The following calculation just does this in log-space.
+
+        # This can be zero if `max_rejects` is finite and the rejection
+        # sampling has thrown away a very large amount of probability mass.
+        if estimators_prediction > 0:
+            logp = logsumexp(
+                (
+                    logp_all_zero + np.log(base_estimator),
+                    logp_non_zero + np.log(estimators_prediction),
+                )
+            )
+        else:
+            logp = logp_all_zero + np.log(base_estimator)
+
+        assert 0 >= logp > -float("inf"), logp
 
         logw = logp + logZ
 
