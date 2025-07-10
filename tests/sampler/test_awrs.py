@@ -108,9 +108,9 @@ def cont_weights(draw, V_size, min_p=1e-3):
 @st.composite
 def bool_weights(draw, V_size):
     # Generate a list of booleans for each token in the vocabulary (and EOS).
-    weights = [False] * (V_size + 1)
-    for i in draw(st.sets(st.integers(min_value=0, max_value=V_size), min_size=1)):
-        weights[i] = True
+    n_false = draw(st.integers(min_value=0, max_value=V_size))
+    n_true = V_size + 1 - n_false
+    weights = draw(st.permutations([True] * n_true + [False] * n_false))
     return weights
 
 
