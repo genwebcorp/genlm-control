@@ -88,6 +88,7 @@ class StreamingState(ParticleState):
         self.__background_thread = None
         self.__score = 0.0
         self.__shut_down = False
+        self.diagnostics = {}
 
     def __new_token(self):
         self.__token += 1
@@ -114,7 +115,14 @@ class StreamingState(ParticleState):
 
     async def impl_update_context(self, incremental_context):
         await self.__initialize_background()
+        finish = False
+        if incremental_context and incremental_context[-1] == self.owner.eos:
+            finish = True
+            incremental_context = incremental_context[:-1]
+        bytes(incremental_context)
         await self.__send_message(incremental_context)
+        if finish:
+            await self.finish()
 
     async def impl_finish(self):
         await self.__initialize_background()
@@ -146,6 +154,7 @@ class StreamingState(ParticleState):
                 self.__score = payload[0] or 0.0
             case Responses.ERROR:
                 self.__score = -float("inf")
+                self.diagnostics["error"] = payload[0]
 
     def shutdown(self):
         if self.__shut_down:
@@ -262,7 +271,14 @@ class AsyncStreamingState(ParticleState):
 
     async def impl_update_context(self, incremental_context):
         await self.__initialize_background()
+        finish = False
+        if incremental_context and incremental_context[-1] == self.owner.eos:
+            finish = True
+            incremental_context = incremental_context[:-1]
+        bytes(incremental_context)
         await self.__send_message(incremental_context)
+        if finish:
+            await self.finish()
 
     async def impl_finish(self):
         await self.__initialize_background()

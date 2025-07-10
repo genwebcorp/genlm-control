@@ -43,8 +43,8 @@ async def test_rejects_as_prefix_when_no_valid_continuation():
 async def test_whitespace_is_valid_prefix_and_invalid_complete():
     potential = JsonSchema({"type": "object"})
 
-    assert await potential.prefix(b"\t") == 0.0
-    assert await potential.complete(b"\t") == -float("inf")
+    assert await potential.prefix(b" ") == 0.0
+    assert await potential.complete(b" ") == -float("inf")
 
 
 @pytest.mark.asyncio
@@ -153,7 +153,7 @@ def json_schema_potential_problem(draw):
         # theory that this means that if keys are out of
         # order in a shrunk example then it really matters.
         sort_keys=not draw(st.booleans()),
-        indent=draw(st.one_of(st.none(), st.integers(0, 4), st.text(alphabet=" \t"))),
+        indent=draw(st.one_of(st.none(), st.integers(0, 4))),
     )
 
     document = text.encode("utf-8")
@@ -195,7 +195,6 @@ def json_schema_potential_problem(draw):
 @given(json_schema_potential_problem())
 @settings(max_examples=200, deadline=None)
 async def test_always_returns_correctly_on_valid_documents(problem):
-    return
     potential = JsonSchema(problem.schema)
 
     assert await potential.prefix(problem.prefix) == 0.0
@@ -244,6 +243,7 @@ async def test_validates_regex_format():
 @pytest.mark.asyncio
 async def test_will_not_allow_nonsense_after_json():
     potential = JsonSchema({"type": "object"})
+    assert await potential.prefix(b"{} hello world") == -float("inf")
     assert await potential.complete(b"{} hello world") == -float("inf")
 
 
@@ -349,6 +349,21 @@ async def test_rejects_string_as_invalid_integer_before_complete():
     )
 
     assert await potential.prefix(b'"') == -float("inf")
+
+
+@pytest.mark.asyncio
+async def test_accepts_basic_integer_list():
+    potential = JsonSchema({"type": "array", "items": {"type": "integer"}})
+
+    assert await potential.prefix(b"[0]") == 0.0
+    assert await potential.complete(b"[0]") == 0.0
+
+    logs = dict(await potential.logw_next(b"[0]"))
+    for k, v in logs.items():
+        # Forbid all ascii characters other than newline and space.
+        if isinstance(k, int) and k < 128 and k not in b" \n":
+            assert v == -float("inf")
+    assert logs[potential.eos] == 0.0
 
 
 @pytest.mark.asyncio
@@ -622,7 +637,7 @@ def json_schema_potential_problem_multi(draw):
         # theory that this means that if keys are out of
         # order in a shrunk example then it really matters.
         sort_keys=not draw(st.booleans()),
-        indent=draw(st.one_of(st.none(), st.integers(0, 4), st.text(alphabet=" \t"))),
+        indent=draw(st.one_of(st.none(), st.integers(0, 4))),
     )
 
     document = text.encode("utf-8")

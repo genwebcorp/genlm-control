@@ -106,14 +106,34 @@ class StreamingJsonSchema(StreamingPotential):
         self.parser = json_schema_parser(schema)
 
     def calculate_score_from_stream(self, stream: Iterable[Any]) -> float:
-        x = json_stream.load(chunk_to_complete_utf8(stream), persistent=True)
+        rechunked = chunk_to_complete_utf8(stream)
+
+        buffer = bytearray()
+
+        def buffer_rechunked():
+            for s in rechunked:
+                buffer.extend(s)
+                yield s
+
+        x = json_stream.load(buffer_rechunked(), persistent=True)
         self.validator.validate(x)
         if hasattr(x, "read_all"):
             x.read_all()
+
+        json.loads(buffer)
+        for s in rechunked:
+            if s.strip():
+                raise ValueError(f"Data after JSON: {s.decode('utf-8')}")
         return 0.0
 
 
 class ValidateJSON(Potential):
+    """This is a dumping ground for any extra JSON validation we want to do
+    to work around LLM weirdness. Currently it just checks for whitespace
+    and non-printable characters, but it has done more in the past and may
+    do more again in the future.
+    """
+
     def __init__(self):
         super().__init__(
             vocabulary=list(range(256)),
@@ -126,25 +146,14 @@ class ValidateJSON(Potential):
         context = bytes(context)
         if BAD_WHITESPACE.search(context):
             return float("-inf")
+        for c in context:
+            # Forbid control characters other than newline.
+            if c != ord(b"\n") and c < ord(b" "):
+                return float("-inf")
         return 0.0
 
     async def complete(self, context):
-        context = bytes(context)
-        prefix = await self.prefix(context)
-        if prefix == float("-inf"):
-            return float("-inf")
-
-        # json-stream will just read a JSON object off the start of
-        # the stream and then stop, so we reparse the whole string
-        # with the normal JSON parser to validate it at the end, or
-        # we will allow JSON values to be followed by arbitrary nonsense.
-        # This should only fire when we've successfully created a valid
-        # JSON value and want to terminate the sequence.
-        try:
-            json.loads(context)
-            return 0.0
-        except json.JSONDecodeError:
-            return float("-inf")
+        return await self.prefix(context)
 
 
 def JsonSchema(schema):
