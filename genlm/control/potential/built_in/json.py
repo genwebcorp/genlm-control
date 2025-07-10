@@ -348,17 +348,25 @@ class MapParser(Parser[T]):
         return f"{self.base}.map({self.apply})"
 
 
+R = TypeVar("R")
+
+
 class AltParser(Parser[Union[S, T]]):
     def __init__(self, left: Parser[S], right: Parser[T]):
         self.left = left
         self.right = right
 
-    async def parse(self, input: Input) -> T:
+    async def parse(self, input: Input) -> Union[S, T]:
         try:
             with input.preserving_index():
                 return await self.left.parse(input)
         except ParseError:
             return await self.right.parse(input)
+
+    def __floordiv__(self, other: Parser[R]) -> "Parser[Union[T, S, R]]":
+        if isinstance(other, AltParser):
+            return self.left // (self.right // other)
+        return AltParser(self, other)
 
 
 class RegexParser(Parser[str]):
