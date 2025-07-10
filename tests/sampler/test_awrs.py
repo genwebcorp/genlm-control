@@ -358,6 +358,51 @@ async def test_awrs_does_not_return_zero_weight_token_is_valid(
         assert logp == float("-inf")
 
 
+@pytest.mark.asyncio
+@settings(deadline=None, max_examples=100)
+@given(
+    max_accepts=st.integers(min_value=2, max_value=2),
+    n_monte_carlo_samples=st.integers(min_value=1, max_value=5),
+    seed=st.integers(min_value=0, max_value=100),
+    params=params(),
+)
+async def test_awrs_does_not_return_zero_weight_in_default_configuration(
+    params, max_accepts, n_monte_carlo_samples, seed
+):
+    vocab, b_weights, c_weights = params
+
+    potential = MockPotential(
+        vocab,
+        np.array([np.log(w) if w > 0 else float("-inf") for w in c_weights]),
+    )
+    condition = MockPotential(
+        vocab,
+        np.array([np.log(w) if w > 0 else float("-inf") for w in b_weights]),
+    )
+
+    sampler = AWRS(
+        max_accepts=max_accepts,
+        n_monte_carlo_samples=n_monte_carlo_samples,
+        seed=seed,
+        potential=potential,
+        condition=condition,
+    )
+
+    tok, logp, _ = await sampler.sample([])
+
+    if tok == potential.eos:
+        weight = b_weights[-1]
+    else:
+        assert isinstance(tok, bytes)
+        assert len(tok) == 1
+        weight = b_weights[tok[0]]
+
+    if weight > 0:
+        assert logp > float("-inf")
+    else:
+        assert logp == float("-inf")
+
+
 @pytest.mark.parametrize(
     "params",
     [
@@ -391,7 +436,7 @@ async def test_awrs_example_with_underflow_error():
     )
     condition = MockPotential(
         vocab,
-        np.log(b_weights),
+        [0 if b else -float("inf") for b in b_weights],
     )
 
     sampler = AWRS(
@@ -409,3 +454,32 @@ async def test_awrs_example_with_underflow_error():
             assert logp > float("-inf")
         else:
             assert logp == float("-inf")
+
+
+@pytest.mark.asyncio
+async def test_awrs_example_with_underflow_error_never_zero_in_default_configuration():
+    vocab = [bytes([i]) for i in range(182)]
+    b_weights = [False] * 56 + [True] + [False] * 126
+    c_weights = [0.23929169657812532] * 4 + [0.00023929169657812532] * 179
+
+    potential = MockPotential(
+        vocab,
+        np.log(c_weights),
+    )
+    condition = MockPotential(
+        vocab,
+        [0 if b else -float("inf") for b in b_weights],
+    )
+
+    sampler = AWRS(
+        max_accepts=2,
+        n_monte_carlo_samples=1,
+        seed=17,
+        potential=potential,
+        condition=condition,
+    )
+
+    for _ in range(1000):
+        tok, logp, _ = await sampler.sample([])
+        assert tok == bytes([56])
+        assert logp > float("-inf")
