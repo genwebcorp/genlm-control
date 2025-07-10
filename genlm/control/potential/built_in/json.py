@@ -544,6 +544,13 @@ ARBITRARY_JSON = (
 
 
 def json_schema_parser(schema):
+    if "anyOf" in schema:
+        *rest, base = schema["anyOf"]
+        result = json_schema_parser(base)
+        for schema in reversed(rest):
+            result = json_schema_parser(schema) // result
+        return result
+
     if "type" not in schema:
         return ARBITRARY_JSON
     elif schema["type"] == "number":
