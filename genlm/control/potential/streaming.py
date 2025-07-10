@@ -145,7 +145,13 @@ class StreamingState(ParticleState):
         self.__receive_response(token)
 
     def __receive_response(self, token):
-        response_token, response_type, *payload = self.__background.responses.get()
+        while True:
+            # In some error cases we can fail to acknowledge a response. We just silently
+            # drop these.
+            response_token, response_type, *payload = self.__background.responses.get()
+            assert response_token <= token
+            if token == response_token:
+                break
         assert token == response_token, (token, response_token, response_type)
         match response_type:
             case Responses.INCOMPLETE:
