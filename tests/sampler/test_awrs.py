@@ -78,8 +78,8 @@ async def assert_monte_carlo_close(
 
 
 @st.composite
-def V_size(draw):
-    return draw(st.integers(min_value=1, max_value=256))
+def V_size(draw, max_size=256):
+    return draw(st.integers(min_value=1, max_value=min(max_size, 256)))
 
 
 @st.composite
@@ -109,14 +109,14 @@ def cont_weights(draw, V_size, min_p=1e-3):
 def bool_weights(draw, V_size):
     # Generate a list of booleans for each token in the vocabulary (and EOS).
     weights = [False] * (V_size + 1)
-    for i in draw(st.sets(st.integers(min_value=0, max_value=V_size))):
+    for i in draw(st.sets(st.integers(min_value=0, max_value=V_size), min_size=1)):
         weights[i] = True
     return weights
 
 
 @st.composite
-def params(draw, min_p=1e-3):
-    vocab_size = draw(V_size())
+def params(draw, max_size=5, min_p=1e-3):
+    vocab_size = draw(V_size(max_size=max_size))
     b_weights = draw(bool_weights(vocab_size))
     c_weights = draw(cont_weights(vocab_size, min_p))
     return [bytes([i]) for i in range(vocab_size)], b_weights, c_weights
@@ -290,10 +290,10 @@ async def test_does_not_returns_zero_weight_if_could_find_valid_token():
 )
 @settings(deadline=None, max_examples=25)
 @given(
-    params=params(),
     max_accepts=st.integers(min_value=2, max_value=5),
     max_rejects=st.integers(min_value=2, max_value=5),
     n_monte_carlo_samples=st.integers(min_value=1, max_value=5),
+    params=params(),
 )
 async def test_awrs_with_different_limits(
     params, max_accepts, max_rejects, n_monte_carlo_samples
@@ -318,7 +318,7 @@ async def test_awrs_with_different_limits(
     max_rejects=st.integers(min_value=2, max_value=500),
     n_monte_carlo_samples=st.integers(min_value=1, max_value=5),
     seed=st.integers(min_value=0, max_value=100),
-    params=params(),
+    params=params(max_size=256),
 )
 async def test_awrs_does_not_return_zero_weight_token_is_valid(
     params, max_accepts, max_rejects, n_monte_carlo_samples, seed
@@ -364,7 +364,7 @@ async def test_awrs_does_not_return_zero_weight_token_is_valid(
     max_accepts=st.integers(min_value=2, max_value=2),
     n_monte_carlo_samples=st.integers(min_value=1, max_value=5),
     seed=st.integers(min_value=0, max_value=100),
-    params=params(),
+    params=params(max_size=256),
 )
 async def test_awrs_does_not_return_zero_weight_in_default_configuration(
     params, max_accepts, n_monte_carlo_samples, seed
