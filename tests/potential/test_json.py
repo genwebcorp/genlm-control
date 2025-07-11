@@ -708,3 +708,34 @@ async def test_can_reject_wrong_type_inside_any_of():
     potential = ParserPotential(parser)
 
     assert await potential.prefix(b'"') == -float("inf")
+
+
+@pytest.mark.asyncio
+async def test_can_reject_early_in_any_of():
+    schema = {
+        "anyOf": [
+            {
+                "type": "object",
+                "properties": {
+                    "a": {"type": "string"},
+                },
+                "required": ["a"],
+            },
+            {
+                "type": "object",
+                "properties": {
+                    "a": {"type": "number"},
+                },
+                "required": ["a"],
+            },
+        ]
+    }
+
+    parser = json_schema_parser(schema)
+    potential = ParserPotential(parser)
+
+    assert await potential.prefix(b'"') == -float("inf")
+    assert await potential.prefix(b'{"a":') == 0
+    assert await potential.prefix(b'{"a": "') == 0
+    assert await potential.prefix(b'{"a": 1') == 0
+    assert await potential.prefix(b'{"a": {') == -float("inf")
