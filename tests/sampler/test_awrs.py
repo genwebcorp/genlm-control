@@ -483,3 +483,24 @@ async def test_awrs_example_with_underflow_error_never_zero_in_default_configura
         tok, logp, _ = await sampler.sample([])
         assert tok == bytes([56])
         assert logp > float("-inf")
+
+
+@pytest.mark.asyncio
+async def test_can_sample_reliably_with_rounding_to_one():
+    vocab = [bytes([i]) for i in range(10)]
+
+    # Chosen because although these sum to 1, they also sum to 1 with
+    # one of them removed. This potentially triggers rounding to one
+    # in the running sum of rejection probabilities unless we're careful.
+    c_weights = [0.999999999999999] + [9.992007221626409e-17] * 10
+    b_weights = [False, True] + [False] * 9
+
+    potential = MockPotential(vocab, np.log(c_weights))
+    condition = MockPotential(vocab, np.log(b_weights))
+
+    sampler = AWRS(potential, condition, max_accepts=2, max_rejects=11)
+
+    for _ in range(1000):
+        tok, logp, _ = await sampler.sample([])
+        assert tok == bytes([1])
+        assert logp > -float("inf")

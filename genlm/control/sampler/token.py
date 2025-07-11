@@ -317,6 +317,7 @@ class AWRS(TokenSampler):
         n_rejects = 0
 
         tok = None
+        tok_logp = -float("inf")
         rejected_tok = None
         progress = True
 
@@ -335,6 +336,7 @@ class AWRS(TokenSampler):
                     replacement_probabilities.append(replacement_probabilities[-1])
                     if tok is None:
                         tok = toks[item]
+                        tok_logp = logps[item]
                     n_accepts += 1
                     break
                 else:
@@ -382,6 +384,11 @@ class AWRS(TokenSampler):
                 return local_accepts / denominator
 
         novel_probabilities = 1 - np.array(replacement_probabilities[:-1])
+        # The novel probability should never be less than the probability of
+        # the token we accepted, but it can be for numerical stability reasons.
+        # We boost it to avoid zero probabilities.
+        novel_probabilities = np.maximum(novel_probabilities, np.exp(tok_logp))
+
         for i, x in enumerate(novel_probabilities):
             if x < 1:
                 novel_start = i
