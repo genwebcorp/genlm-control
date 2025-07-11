@@ -363,11 +363,6 @@ class AltParser(Parser[Union[S, T]]):
         except ParseError:
             return await self.right.parse(input)
 
-    def __floordiv__(self, other: Parser[R]) -> "Parser[Union[T, S, R]]":
-        if isinstance(other, AltParser):
-            return self.left // (self.right // other)
-        return AltParser(self, other)
-
 
 class RegexParser(Parser[str]):
     def __init__(self, pattern, group=0, options=regex.MULTILINE | regex.UNICODE):
