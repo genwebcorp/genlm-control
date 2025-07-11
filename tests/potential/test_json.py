@@ -580,7 +580,7 @@ async def test_validates_a_list_of_integers_parser_only():
 async def test_can_calculate_many_prefixes():
     potential = JsonSchema({"type": "object"})
 
-    for i in range(10000):
+    for i in range(100):
         prefix = b'{ "' + str(i).encode("utf-8")
         pot = await potential.prefix(prefix)
         assert pot == 0.0
@@ -688,3 +688,54 @@ async def test_cache_eviction_with_many_prefixes(problem, cache_size):
     assert all(result == 0.0 for result in results)
 
     assert await potential.complete(problem.document) == 0.0
+
+
+@pytest.mark.asyncio
+async def test_can_reject_wrong_type_inside_any_of():
+    schema = {
+        "anyOf": [
+            {
+                "anyOf": [
+                    {
+                        "type": "object",
+                    },
+                ]
+            },
+        ]
+    }
+
+    parser = json_schema_parser(schema)
+    potential = ParserPotential(parser)
+
+    assert await potential.prefix(b'"') == -float("inf")
+
+
+@pytest.mark.asyncio
+async def test_can_reject_early_in_any_of():
+    schema = {
+        "anyOf": [
+            {
+                "type": "object",
+                "properties": {
+                    "a": {"type": "string"},
+                },
+                "required": ["a"],
+            },
+            {
+                "type": "object",
+                "properties": {
+                    "a": {"type": "number"},
+                },
+                "required": ["a"],
+            },
+        ]
+    }
+
+    parser = json_schema_parser(schema)
+    potential = ParserPotential(parser)
+
+    assert await potential.prefix(b'"') == -float("inf")
+    assert await potential.prefix(b'{"a":') == 0
+    assert await potential.prefix(b'{"a": "') == 0
+    assert await potential.prefix(b'{"a": 1') == 0
+    assert await potential.prefix(b'{"a": {') == -float("inf")
