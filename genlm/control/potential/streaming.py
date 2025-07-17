@@ -88,6 +88,7 @@ class StreamingState(ParticleState):
         self.__background_thread = None
         self.__score = 0.0
         self.__shut_down = False
+        self.diagnostics = {}
 
     def __new_token(self):
         self.__token += 1
@@ -114,7 +115,14 @@ class StreamingState(ParticleState):
 
     async def impl_update_context(self, incremental_context):
         await self.__initialize_background()
+        finish = False
+        if incremental_context and incremental_context[-1] == self.owner.eos:
+            finish = True
+            incremental_context = incremental_context[:-1]
+        bytes(incremental_context)
         await self.__send_message(incremental_context)
+        if finish:
+            await self.finish()
 
     async def impl_finish(self):
         await self.__initialize_background()
@@ -137,8 +145,14 @@ class StreamingState(ParticleState):
         self.__receive_response(token)
 
     def __receive_response(self, token):
-        response_token, response_type, *payload = self.__background.responses.get()
-        assert token == response_token
+        while True:
+            # In some error cases we can fail to acknowledge a response. We just silently
+            # drop these.
+            response_token, response_type, *payload = self.__background.responses.get()
+            assert response_token <= token
+            if token == response_token:
+                break
+        assert token == response_token, (token, response_token, response_type)
         match response_type:
             case Responses.INCOMPLETE:
                 pass
@@ -146,6 +160,7 @@ class StreamingState(ParticleState):
                 self.__score = payload[0] or 0.0
             case Responses.ERROR:
                 self.__score = -float("inf")
+                self.diagnostics["error"] = payload[0]
 
     def shutdown(self):
         if self.__shut_down:
@@ -164,12 +179,13 @@ class StreamingState(ParticleState):
 
 
 class StreamingPotential(StatefulPotential, ABC):
-    def __init__(self, vocabulary, token_type=None, eos=None):
+    def __init__(self, vocabulary, token_type=None, eos=None, **kwargs):
         super().__init__(
             vocabulary=vocabulary,
             token_type=token_type,
             eos=eos,
             state_class=StreamingState,
+            **kwargs,
         )
 
     @abstractmethod
@@ -261,7 +277,14 @@ class AsyncStreamingState(ParticleState):
 
     async def impl_update_context(self, incremental_context):
         await self.__initialize_background()
+        finish = False
+        if incremental_context and incremental_context[-1] == self.owner.eos:
+            finish = True
+            incremental_context = incremental_context[:-1]
+        bytes(incremental_context)
         await self.__send_message(incremental_context)
+        if finish:
+            await self.finish()
 
     async def impl_finish(self):
         await self.__initialize_background()

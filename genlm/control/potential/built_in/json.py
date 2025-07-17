@@ -94,9 +94,10 @@ def chunk_bytes_to_strings(byte_blocks):
 
 
 class StreamingJsonSchema(StreamingPotential):
-    def __init__(self, schema):
+    def __init__(self, schema, **kwargs):
         super().__init__(
             vocabulary=list(range(256)),
+            **kwargs,
         )
         self.schema = schema
         self.validator = LazyCompatibleValidator(
@@ -105,14 +106,34 @@ class StreamingJsonSchema(StreamingPotential):
         self.parser = json_schema_parser(schema)
 
     def calculate_score_from_stream(self, stream: Iterable[Any]) -> float:
-        x = json_stream.load(chunk_to_complete_utf8(stream), persistent=True)
+        rechunked = chunk_to_complete_utf8(stream)
+
+        buffer = bytearray()
+
+        def buffer_rechunked():
+            for s in rechunked:
+                buffer.extend(s)
+                yield s
+
+        x = json_stream.load(buffer_rechunked(), persistent=True)
         self.validator.validate(x)
         if hasattr(x, "read_all"):
             x.read_all()
+
+        json.loads(buffer)
+        for s in rechunked:
+            if s.strip():
+                raise ValueError(f"Data after JSON: {s.decode('utf-8')}")
         return 0.0
 
 
 class ValidateJSON(Potential):
+    """This is a dumping ground for any extra JSON validation we want to do
+    to work around LLM weirdness. Currently it just checks for whitespace
+    and non-printable characters, but it has done more in the past and may
+    do more again in the future.
+    """
+
     def __init__(self):
         super().__init__(
             vocabulary=list(range(256)),
@@ -125,25 +146,14 @@ class ValidateJSON(Potential):
         context = bytes(context)
         if BAD_WHITESPACE.search(context):
             return float("-inf")
+        for c in context:
+            # Forbid control characters other than newline.
+            if c != ord(b"\n") and c < ord(b" "):
+                return float("-inf")
         return 0.0
 
     async def complete(self, context):
-        context = bytes(context)
-        prefix = await self.prefix(context)
-        if prefix == float("-inf"):
-            return float("-inf")
-
-        # json-stream will just read a JSON object off the start of
-        # the stream and then stop, so we reparse the whole string
-        # with the normal JSON parser to validate it at the end, or
-        # we will allow JSON values to be followed by arbitrary nonsense.
-        # This should only fire when we've successfully created a valid
-        # JSON value and want to terminate the sequence.
-        try:
-            json.loads(context)
-            return 0.0
-        except json.JSONDecodeError:
-            return float("-inf")
+        return await self.prefix(context)
 
 
 def JsonSchema(schema):
@@ -338,12 +348,15 @@ class MapParser(Parser[T]):
         return f"{self.base}.map({self.apply})"
 
 
+R = TypeVar("R")
+
+
 class AltParser(Parser[Union[S, T]]):
     def __init__(self, left: Parser[S], right: Parser[T]):
         self.left = left
         self.right = right
 
-    async def parse(self, input: Input) -> T:
+    async def parse(self, input: Input) -> Union[S, T]:
         try:
             with input.preserving_index():
                 return await self.left.parse(input)
@@ -416,7 +429,19 @@ class ObjectSchemaParser(Parser[Any]):
 
         properties = self.schema.get("properties", {})
         self.child_parsers = {k: json_schema_parser(v) for k, v in properties.items()}
-        if schema.get("additionalProperties", False):
+
+        # JSON schemas accept additional properties by default, but when
+        # generating that's almost always not what we want. The approach
+        # we take is to default to false, except in the case where no properties
+        # are specified, which we take to mean that an arbitrary object is expected
+        # here, so we default it to false. Where it is specified we always use
+        # the explicit value.
+        if "additionalProperties" in schema:
+            allow_additional_properties = schema["additionalProperties"]
+        else:
+            allow_additional_properties = "properties" not in schema
+
+        if allow_additional_properties:
             self.key_parser = STRING_LITERAL_PARSER
         else:
             # TODO: Something is going wrong here with regex escape codes
@@ -514,6 +539,13 @@ ARBITRARY_JSON = (
 
 
 def json_schema_parser(schema):
+    if "anyOf" in schema:
+        *rest, base = schema["anyOf"]
+        result = json_schema_parser(base)
+        for schema in reversed(rest):
+            result = json_schema_parser(schema) // result
+        return result
+
     if "type" not in schema:
         return ARBITRARY_JSON
     elif schema["type"] == "number":
@@ -526,7 +558,7 @@ def json_schema_parser(schema):
         return BOOL_PARSER
     elif schema["type"] == "string":
         return STRING_LITERAL_PARSER
-    elif schema["type"] == "object" and schema.get("properties"):
+    elif schema["type"] == "object":
         return ObjectSchemaParser(schema)
     elif schema["type"] == "array":
         return ArraySchemaParser(schema)

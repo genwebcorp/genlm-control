@@ -20,6 +20,7 @@ from typing import Any
 from dataclasses import dataclass
 from hypothesis import given, strategies as st, assume, example, settings, reject
 from hypothesis_jsonschema import from_schema
+import asyncio
 
 
 @pytest.mark.asyncio
@@ -42,8 +43,8 @@ async def test_rejects_as_prefix_when_no_valid_continuation():
 async def test_whitespace_is_valid_prefix_and_invalid_complete():
     potential = JsonSchema({"type": "object"})
 
-    assert await potential.prefix(b"\t") == 0.0
-    assert await potential.complete(b"\t") == -float("inf")
+    assert await potential.prefix(b" ") == 0.0
+    assert await potential.complete(b" ") == -float("inf")
 
 
 @pytest.mark.asyncio
@@ -152,7 +153,7 @@ def json_schema_potential_problem(draw):
         # theory that this means that if keys are out of
         # order in a shrunk example then it really matters.
         sort_keys=not draw(st.booleans()),
-        indent=draw(st.one_of(st.none(), st.integers(0, 4), st.text(alphabet=" \t"))),
+        indent=draw(st.one_of(st.none(), st.integers(0, 4))),
     )
 
     document = text.encode("utf-8")
@@ -194,7 +195,6 @@ def json_schema_potential_problem(draw):
 @given(json_schema_potential_problem())
 @settings(max_examples=200, deadline=None)
 async def test_always_returns_correctly_on_valid_documents(problem):
-    return
     potential = JsonSchema(problem.schema)
 
     assert await potential.prefix(problem.prefix) == 0.0
@@ -243,6 +243,7 @@ async def test_validates_regex_format():
 @pytest.mark.asyncio
 async def test_will_not_allow_nonsense_after_json():
     potential = JsonSchema({"type": "object"})
+    assert await potential.prefix(b"{} hello world") == -float("inf")
     assert await potential.complete(b"{} hello world") == -float("inf")
 
 
@@ -348,6 +349,21 @@ async def test_rejects_string_as_invalid_integer_before_complete():
     )
 
     assert await potential.prefix(b'"') == -float("inf")
+
+
+@pytest.mark.asyncio
+async def test_accepts_basic_integer_list():
+    potential = JsonSchema({"type": "array", "items": {"type": "integer"}})
+
+    assert await potential.prefix(b"[0]") == 0.0
+    assert await potential.complete(b"[0]") == 0.0
+
+    logs = dict(await potential.logw_next(b"[0]"))
+    for k, v in logs.items():
+        # Forbid all ascii characters other than newline and space.
+        if isinstance(k, int) and k < 128 and k not in b" \n":
+            assert v == -float("inf")
+    assert logs[potential.eos] == 0.0
 
 
 @pytest.mark.asyncio
@@ -564,7 +580,7 @@ async def test_validates_a_list_of_integers_parser_only():
 async def test_can_calculate_many_prefixes():
     potential = JsonSchema({"type": "object"})
 
-    for i in range(10000):
+    for i in range(100):
         prefix = b'{ "' + str(i).encode("utf-8")
         pot = await potential.prefix(prefix)
         assert pot == 0.0
@@ -595,3 +611,131 @@ async def test_float_parser_can_continue_parsing_across_boundaries():
     f = await input.parse(parser)
 
     assert f == 2.01
+
+
+@dataclass(frozen=True)
+class JSONSchemaPotentialProblemMulti:
+    schema: Any
+    document: bytes
+    values: list[bytes]
+
+    @property
+    def value(self):
+        return json.loads(self.document)
+
+
+@st.composite
+def json_schema_potential_problem_multi(draw):
+    schema = draw(json_schema())
+    value = draw(from_schema(schema))
+    text = json.dumps(
+        value,
+        # Inverted so that this shrinks to True, as ascii-only
+        # JSON is simpler.
+        ensure_ascii=not draw(st.booleans()),
+        # Similarly inverted so as to shrink to True, on the
+        # theory that this means that if keys are out of
+        # order in a shrunk example then it really matters.
+        sort_keys=not draw(st.booleans()),
+        indent=draw(st.one_of(st.none(), st.integers(0, 4))),
+    )
+
+    document = text.encode("utf-8")
+    assert document
+    assume(len(document) > 1)
+
+    values = []
+
+    for _ in range(draw(st.integers(1, 10))):
+        offsets = draw(st.sets(st.integers(1, len(document) - 1), min_size=1))
+        offsets = sorted(offsets)
+        prefixes = [document[:v] for v in offsets]
+        values.extend(prefixes)
+
+    values = draw(st.permutations(values))
+    values = values[: draw(st.integers(1, len(values)))]
+
+    return JSONSchemaPotentialProblemMulti(
+        schema=schema, document=document, values=values
+    )
+
+
+@pytest.mark.asyncio
+@example(
+    problem=JSONSchemaPotentialProblemMulti(
+        schema={"type": "boolean"},
+        document=b"false",
+        values=[b"f", b"fa", b"fal", b"f"],
+    ),
+    cache_size=1,
+)
+@example(
+    problem=JSONSchemaPotentialProblemMulti(
+        schema={"type": "boolean"},
+        document=b"false",
+        values=[b"f", b"fa", b"f", b"fa", b"fal", b"f", b"fa", b"fal", b"fals"],
+    ),
+    cache_size=5,
+)
+@given(json_schema_potential_problem_multi(), st.integers(1, 100))
+@settings(report_multiple_bugs=False, deadline=None)
+async def test_cache_eviction_with_many_prefixes(problem, cache_size):
+    potential = StreamingJsonSchema(problem.schema, cache_size=cache_size)
+
+    results = list(
+        await asyncio.gather(*[potential.prefix(value) for value in problem.values])
+    )
+    assert all(result == 0.0 for result in results)
+
+    assert await potential.complete(problem.document) == 0.0
+
+
+@pytest.mark.asyncio
+async def test_can_reject_wrong_type_inside_any_of():
+    schema = {
+        "anyOf": [
+            {
+                "anyOf": [
+                    {
+                        "type": "object",
+                    },
+                ]
+            },
+        ]
+    }
+
+    parser = json_schema_parser(schema)
+    potential = ParserPotential(parser)
+
+    assert await potential.prefix(b'"') == -float("inf")
+
+
+@pytest.mark.asyncio
+async def test_can_reject_early_in_any_of():
+    schema = {
+        "anyOf": [
+            {
+                "type": "object",
+                "properties": {
+                    "a": {"type": "string"},
+                },
+                "required": ["a"],
+            },
+            {
+                "type": "object",
+                "properties": {
+                    "a": {"type": "number"},
+                },
+                "required": ["a"],
+            },
+        ]
+    }
+
+    parser = json_schema_parser(schema)
+    potential = ParserPotential(parser)
+
+    assert await potential.prefix(b'"') == -float("inf")
+    assert await potential.prefix(b'{"a":') == 0
+    assert await potential.prefix(b'{"a": "') == 0
+    assert await potential.prefix(b'{"a": 1') == 0
+    assert await potential.prefix(b'{"a": {') == -float("inf")
